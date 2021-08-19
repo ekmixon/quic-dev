@@ -156,6 +156,12 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 				h3->err = QPACK_DECOMPRESSION_FAILED;
 				return -1;
 			}
+
+			char OK[] = { '\x01', '\x03', '\x00', '\x00', '\xd9' };
+			struct buffer buf2 = b_make(NULL, 0, 0, 0);
+			b_alloc(&buf2);
+			b_putblk(&buf2, OK, 5);
+			qc_snd_buf(qcs, &buf2, b_data(&buf2), 0);
 			break;
 		}
 		case H3_FT_PUSH_PROMISE:

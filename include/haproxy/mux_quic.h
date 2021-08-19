@@ -41,6 +41,8 @@ struct qcs *ruqs_new(struct qcc *qcc, uint64_t id);
 size_t luqs_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags);
 void qcs_release(struct qcs *qcs);
 
+size_t qc_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags);
+
 void ruqs_notify_recv(struct qcs *qcs);
 
 /* Return 1 if the stream with <id> as ID attached to <qcc> connection
