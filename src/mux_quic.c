@@ -1001,6 +1001,7 @@ struct qcs *bidi_qcs_new(struct qcc *qcc, uint64_t id)
 	qcs->tx.st       = QC_TX_SS_IDLE;
 	qcs->tx.bytes    = qcs->tx.offset = 0;
 	qcs->tx.max_data = qcc->strms[qcs_type].tx.max_data;
+	qcs->tx.buf = BUF_NULL;
 
 	eb64_insert(&qcc->streams_by_id, &qcs->by_id);
 	qcc->strms[qcs_type].nb_streams++;
@@ -1822,15 +1823,54 @@ static size_t qc_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
  * <count> bytes. Returns the number of bytes effectively sent. Some status
  * flags may be updated on the conn_stream.
  */
-static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
+//size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
+size_t qc_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags)
 {
-	struct qcs *qcs = cs->ctx;
-	size_t total = 0;
+	size_t room, total = 0;
+	//struct qcs *qcs = cs->ctx;
+	struct buffer *res;
+	struct quic_frame *frm;
 
 	TRACE_ENTER(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);
-	/* XXX TO DO XXX */
+	if (!count)
+		goto out;
+
+	res = &qcs->tx.buf;
+	if (!qc_get_buf(qcs->qcc, res)) {
+		qcs->qcc->flags |= QC_CF_MUX_MALLOC;
+		goto out;
+	}
+
+	room = b_room(res);
+	if (!room)
+		goto out;
+
+	if (count > room)
+		count = room;
+
+	total += b_xfer(res, buf, count);
+
+	frm = pool_zalloc(pool_head_quic_frame);
+	if (!frm)
+		goto err;
+
+	frm->type = QUIC_FT_STREAM_8 | QUIC_STREAM_FRAME_TYPE_FIN_BIT;
+	frm->stream.id = qcs->by_id.key;
+	if (total) {
+		frm->type |= QUIC_STREAM_FRAME_TYPE_LEN_BIT;
+		frm->stream.len = total;
+		frm->stream.data = (unsigned char *)b_head(res);
+	}
+
+	struct quic_enc_level *qel = &qcs->qcc->conn->qc->els[QUIC_TLS_ENC_LEVEL_APP];
+	MT_LIST_APPEND(&qel->pktns->tx.frms, &frm->mt_list);
+ out:
 	fprintf(stderr, "%s: count=%zu\n", __func__, count);
 	TRACE_LEAVE(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);
+	return total;
+
+ err:
+	TRACE_DEVEL("leaving on stream error", QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn);
 	return total;
 }
 
@@ -2089,7 +2129,7 @@ static int qc_takeover(struct connection *conn, int orig_tid)
 static const struct mux_ops qc_ops = {
 	.init = qc_init,
 	.wake = qc_wake,
-	.snd_buf = qc_snd_buf,
+	//.snd_buf = qc_snd_buf,
 	.rcv_buf = qc_rcv_buf,
 	.subscribe = qc_subscribe,
 	.unsubscribe = qc_unsubscribe,
