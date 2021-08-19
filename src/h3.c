@@ -17,12 +17,15 @@
  */
 
 #include <haproxy/buf.h>
+#include <haproxy/connection.h>
 #include <haproxy/dynbuf.h>
 #include <haproxy/h3.h>
+#include <haproxy/htx.h>
 #include <haproxy/istbuf.h>
 #include <haproxy/mux_quic.h>
 #include <haproxy/pool.h>
 #include <haproxy/qpack-dec.h>
+#include <haproxy/stream.h>
 #include <haproxy/tools.h>
 #include <haproxy/xprt_quic.h>
 
@@ -120,7 +123,10 @@ static inline size_t h3_decode_frm_header(uint64_t *ftype, uint64_t *flen,
 static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 {
 	struct buffer *rxbuf = &qcs->rx.buf;
+	struct buffer rxbuf2 = BUF_NULL;
 	struct h3 *h3 = ctx;
+	struct htx *htx;
+	struct conn_stream *cs;
 
 	h3_debug_printf(stderr, "%s: STREAM ID: %llu\n", __func__, qcs->by_id.key);
 	if (!b_data(rxbuf))
@@ -157,11 +163,16 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 				return -1;
 			}
 
-			char OK[] = { '\x01', '\x03', '\x00', '\x00', '\xd9' };
-			struct buffer buf2 = b_make(NULL, 0, 0, 0);
-			b_alloc(&buf2);
-			b_putblk(&buf2, OK, 5);
-			qc_snd_buf(qcs, &buf2, b_data(&buf2), 0);
+			qc_get_buf(qcs->qcc, &rxbuf2);
+			htx = htx_from_buf(&rxbuf2);
+
+			htx_add_stline(htx, HTX_BLK_REQ_SL, 0, ist("GET"), ist("/"), ist("HTTP/3.0"));
+			htx_to_buf(htx, &rxbuf2);
+
+			cs = cs_new(qcs->qcc->conn, qcs->qcc->conn->target);
+			cs->ctx = qcs;
+			stream_create_from_cs(cs, &rxbuf2);
+
 			break;
 		}
 		case H3_FT_PUSH_PROMISE:

@@ -1823,13 +1823,17 @@ static size_t qc_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
  * <count> bytes. Returns the number of bytes effectively sent. Some status
  * flags may be updated on the conn_stream.
  */
-//size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
-size_t qc_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags)
+static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
 {
 	size_t room, total = 0;
-	//struct qcs *qcs = cs->ctx;
+	struct qcs *qcs = cs->ctx;
 	struct buffer *res;
 	struct quic_frame *frm;
+
+	char http_200[] = { '\x01', '\x03', '\x00', '\x00', '\xd9' };
+	struct buffer buf_http_200 = BUF_NULL;
+	b_alloc(&buf_http_200);
+	b_putblk(&buf_http_200, http_200, sizeof(http_200));
 
 	TRACE_ENTER(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);
 	if (!count)
@@ -1848,7 +1852,7 @@ size_t qc_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags)
 	if (count > room)
 		count = room;
 
-	total += b_xfer(res, buf, count);
+	total += b_xfer(res, &buf_http_200, b_data(&buf_http_200));
 
 	frm = pool_zalloc(pool_head_quic_frame);
 	if (!frm)
@@ -2129,7 +2133,7 @@ static int qc_takeover(struct connection *conn, int orig_tid)
 static const struct mux_ops qc_ops = {
 	.init = qc_init,
 	.wake = qc_wake,
-	//.snd_buf = qc_snd_buf,
+	.snd_buf = qc_snd_buf,
 	.rcv_buf = qc_rcv_buf,
 	.subscribe = qc_subscribe,
 	.unsubscribe = qc_unsubscribe,
