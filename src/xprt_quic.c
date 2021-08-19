@@ -3672,6 +3672,16 @@ static inline int qc_build_frms(struct quic_tx_packet *pkt,
 			break;
 
 		case QUIC_FT_STREAM_8 ... QUIC_FT_STREAM_F:
+			flen = qc_frm_len(cf);
+			BUG_ON(!flen);
+			if (flen > room)
+				continue;
+
+			*len += flen;
+			room -= flen;
+			MT_LIST_DELETE_SAFE(tmp1);
+			LIST_APPEND(&pkt->frms, &cf->list);
+
 			break;
 
 		default:
