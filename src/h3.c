@@ -127,6 +127,9 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 	struct h3 *h3 = ctx;
 	struct htx *htx;
 	struct conn_stream *cs;
+	struct http_hdr list[global.tune.max_http_hdr];
+	unsigned int flags = HTX_SL_F_NONE;
+	int i, hdr;
 
 	h3_debug_printf(stderr, "%s: STREAM ID: %llu\n", __func__, qcs->by_id.key);
 	if (!b_data(rxbuf))
@@ -157,8 +160,10 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 			const unsigned char *buf = (const unsigned char *)b_head(rxbuf);
 			size_t len = b_data(rxbuf);
 			struct buffer *tmp = get_trash_chunk();
+			struct ist meth = IST_NULL, path = IST_NULL;
+			struct ist scheme = IST_NULL, authority = IST_NULL;
 
-			if (qpack_decode_fs(buf, len, tmp) < 0) {
+			if ((i = qpack_decode_fs(buf, len, tmp, list)) < 0) {
 				h3->err = QPACK_DECOMPRESSION_FAILED;
 				return -1;
 			}
@@ -166,7 +171,36 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 			qc_get_buf(qcs->qcc, &rxbuf2);
 			htx = htx_from_buf(&rxbuf2);
 
-			htx_add_stline(htx, HTX_BLK_REQ_SL, 0, ist("GET"), ist("/"), ist("HTTP/3.0"));
+			/* first treat pseudo-header to build the start line */
+			for (hdr = 0; hdr < i; ++hdr) {
+				if (istmatch(list[hdr].n, ist(":"))) {
+					/* pseudo-header */
+					if (isteq(list[hdr].n, ist(":method")))
+						meth = list[hdr].v;
+					else if (isteq(list[hdr].n, ist(":path")))
+						path = list[hdr].v;
+					else if (isteq(list[hdr].n, ist(":scheme")))
+						scheme = list[hdr].v;
+					else if (isteq(list[hdr].n, ist(":authority")))
+						authority = list[hdr].v;
+				}
+			}
+
+			flags |= HTX_SL_F_VER_11;
+
+			htx_add_stline(htx, HTX_BLK_REQ_SL, flags, meth, path, ist("HTTP/3.0"));
+
+			if (isttest(authority))
+				htx_add_header(htx, ist("host"), authority);
+
+			/* now treat standard headers */
+			for (hdr = 0; hdr < i; ++hdr) {
+				if (!istmatch(list[hdr].n, ist(":"))) {
+					htx_add_header(htx, list[hdr].n, list[hdr].v);
+				}
+			}
+
+			htx_add_endof(htx, HTX_BLK_EOH);
 			htx_to_buf(htx, &rxbuf2);
 
 			cs = cs_new(qcs->qcc->conn, qcs->qcc->conn->target);

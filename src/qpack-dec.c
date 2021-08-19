@@ -29,8 +29,10 @@
 #include <haproxy/h3.h>
 #include <haproxy/qpack-t.h>
 #include <haproxy/qpack-dec.h>
+#include <haproxy/qpack-tbl.h>
 #include <haproxy/hpack-huff.h>
 #include <haproxy/hpack-tbl.h>
+#include <haproxy/http-hdr.h>
 #include <haproxy/tools.h>
 
 #define DEBUG_HPACK
@@ -177,12 +179,13 @@ static int qpack_decode_fs_pfx(uint64_t *enc_ric, uint64_t *db, int *sign_bit,
 /* Decode a field section from <len> bytes length <raw> buffer.
  * Produces the output into <tmp> buffer.
  */
-int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
+int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp, struct http_hdr *list)
 {
 	uint64_t enc_ric, db;
 	int s;
 	unsigned int efl_type;
 	int ret;
+	int ret2 = 0;
 
 	qpack_debug_hexdump(stderr, "[QPACK-DEC-FS] ", (const char *)raw, 0, len);
 
@@ -227,7 +230,8 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 			/* XXX Value string XXX */
 			raw += length;
 			len -= length;
-		} else if (efl_type == QPACK_IFL_WPBI) {
+		}
+		else if (efl_type == QPACK_IFL_WPBI) {
 			/* Indexed field line with post-base index */
 			uint64_t index;
 
@@ -240,7 +244,8 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 			}
 
 			qpack_debug_printf(stderr, " index=%llu", (unsigned long long)index);
-		} else if (efl_type & QPACK_IFL_BIT) {
+		}
+		else if (efl_type & QPACK_IFL_BIT) {
 			/* Indexed field line */
 			uint64_t index;
 			unsigned int t;
@@ -254,8 +259,13 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 				goto out;
 			}
 
+			if (t) {
+				list[ret2++] = qpack_sht[index];
+			}
+
 			qpack_debug_printf(stderr,  " t=%d index=%llu", !!t, (unsigned long long)index);
-		} else if (efl_type & QPACK_LFL_WNR_BIT) {
+		}
+		else if (efl_type & QPACK_LFL_WNR_BIT) {
 			/* Literal field line with name reference */
 			uint64_t index, length;
 			unsigned int t, n, h;
@@ -268,6 +278,10 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 				qpack_debug_printf(stderr, "##ERR@%d\n", __LINE__);
 				ret = -QPACK_ERR_TRUNCATED;
 				goto out;
+			}
+
+			if (t) {
+				list[ret2] = qpack_sht[index];
 			}
 
 			qpack_debug_printf(stderr, " n=%d t=%d index=%llu", !!n, !!t, (unsigned long long)index);
@@ -298,11 +312,14 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 				}
 
 				qpack_debug_printf(stderr, " [name huff %d->%d '%s']", (int)length, (int)nlen, trash);
+				list[ret2].v = ist(strdup(trash));
 			}
 			/* XXX Value string XXX */
 			raw += length;
 			len -= length;
-		} else if (efl_type & QPACK_LFL_WLN_BIT) {
+			++ret2;
+		}
+		else if (efl_type & QPACK_LFL_WLN_BIT) {
 			/* Literal field line with literal name */
 			unsigned int n, hname, hvalue;
 			uint64_t name_len, value_len;
@@ -340,5 +357,6 @@ int qpack_decode_fs(const unsigned char *raw, size_t len, struct buffer *tmp)
 
  out:
 	qpack_debug_printf(stderr, "-- done: ret=%d\n", ret);
-	return ret;
+	//return ret;
+	return ret2;
 }
