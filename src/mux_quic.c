@@ -19,6 +19,7 @@
 #include <haproxy/log.h>
 #include <haproxy/mux_quic.h>
 #include <haproxy/net_helper.h>
+#include <haproxy/qpack-enc.h>
 #include <haproxy/quic_frame.h>
 #include <haproxy/session-t.h>
 #include <haproxy/stats.h>
@@ -1829,11 +1830,10 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	struct qcs *qcs = cs->ctx;
 	struct buffer *res;
 	struct quic_frame *frm;
-
-	char http_200[] = { '\x01', '\x03', '\x00', '\x00', '\xd9' };
-	struct buffer buf_http_200 = BUF_NULL;
-	b_alloc(&buf_http_200);
-	b_putblk(&buf_http_200, http_200, sizeof(http_200));
+	struct htx *htx;
+	enum htx_blk_type btype;
+	struct htx_blk *blk;
+	struct htx_sl *sl;
 
 	TRACE_ENTER(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);
 	if (!count)
@@ -1852,7 +1852,45 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	if (count > room)
 		count = room;
 
-	total += b_xfer(res, &buf_http_200, b_data(&buf_http_200));
+	htx = htx_from_buf(buf);
+
+	blk = htx_get_head_blk(htx);
+	for (blk = htx_get_head_blk(htx);
+	     blk; blk = htx_get_next_blk(htx, blk)) {
+		btype = htx_get_blk_type(blk);
+
+		/* Not implemented : QUIC on backend side */
+		BUG_ON(btype == HTX_BLK_REQ_SL);
+
+		switch (btype) {
+		case HTX_BLK_RES_SL:
+			/* start-line -> HEADERS h3 frame */
+			b_putchr(res, '\x01');  /* h3 frame type = HEADERS */
+			b_putchr(res, '\x00');  /* h3 frame length */
+			total += 2;
+			total += qpack_encode_field_section_line(res);
+
+			sl = htx_get_blk_ptr(htx, blk);
+			qcs->status = sl->info.res.status;
+			total += qpack_encode_int_status(res, qcs->status);
+			break;
+
+		case HTX_BLK_DATA:
+			/* TODO DATA h3 frame */
+			break;
+
+		case HTX_BLK_TLR:
+		case HTX_BLK_EOT:
+			/* TODO trailers */
+			break;
+
+		default:
+			;
+		}
+	}
+
+	/* set h3 frame length, excluding Type - Length */
+	b_head(res)[1] = total - 2;
 
 	frm = pool_zalloc(pool_head_quic_frame);
 	if (!frm)

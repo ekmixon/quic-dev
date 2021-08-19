@@ -187,6 +187,7 @@ struct qcs {
 	struct list list; /* To be used when adding in qcc->send_list or qcc->fctl_lsit */
 	struct tasklet *shut_tl;  /* deferred shutdown tasklet, to retry to send an RST after we failed to,
 				   * in case there's no other subscription to do it */
+	uint16_t status;
 };
 
 /* QUIC application layer operations */
