@@ -268,6 +268,8 @@ DECLARE_STATIC_POOL(pool_head_qcc, "qcc", sizeof(struct qcc));
 /* the qcs stream pool */
 DECLARE_POOL(pool_head_qcs, "qcs", sizeof(struct qcs));
 
+DECLARE_POOL(pool_head_quic_tx_frm, "quic_tx_frm", sizeof(struct quic_frame));
+
 static struct task *qc_timeout_task(struct task *t, void *context, unsigned int state);
 static int qc_send(struct qcc *qcc);
 static int qc_recv(struct qcc *qcc);
@@ -1899,6 +1901,7 @@ size_t luqs_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags
 	size_t room, total = 0;
 	struct qcc *qcc = qcs->qcc;
 	struct buffer *res;
+	struct quic_frame *frm;
 
 	TRACE_ENTER(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn);
 	if (!count)
@@ -1918,6 +1921,26 @@ size_t luqs_snd_buf(struct qcs *qcs, struct buffer *buf, size_t count, int flags
 		count = room;
 
 	total += b_xfer(res, buf, count);
+	frm = pool_zalloc(pool_head_quic_frame);
+	if (!frm)
+		goto err;
+
+	frm->type = QUIC_FT_STREAM_8;
+	frm->stream.id = qcs->by_id.key;
+	if (qcs->tx.offset) {
+		frm->type |= QUIC_STREAM_FRAME_TYPE_OFF_BIT;
+		frm->stream.offset = qcs->tx.offset;
+	}
+	if (total) {
+		frm->type |= QUIC_STREAM_FRAME_TYPE_LEN_BIT;
+		frm->stream.len = total;
+		frm->stream.data = (unsigned char *)b_head(res);
+	}
+
+	//LIST_APPEND(&qcc->conn->qc->tx.frms_to_send, &frm->list);
+	struct quic_enc_level *qel = &qcc->conn->qc->els[QUIC_TLS_ENC_LEVEL_APP];
+	MT_LIST_APPEND(&qel->pktns->tx.frms, &frm->mt_list);
+
 
  out:
 	TRACE_LEAVE(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn);
