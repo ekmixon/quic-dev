@@ -158,6 +158,8 @@ enum qcs_tx_st {
 	QC_TX_SS_RST_RECVD,  // reset received
 };
 
+#define QCS_MBUF_CNT 32
+
 /* QUIC stream descriptor, describing the stream as it appears in the QUIC_CONN, and as
  * it is being processed in the internal HTTP representation (HTX).
  */
@@ -182,6 +184,7 @@ struct qcs {
 		uint64_t offset;   /* the current offset of data to send */
 		uint64_t bytes;    /* number of bytes sent */
 		struct buffer buf; /* transmit buffer, always valid (buf_empty or real buffer) */
+		struct buffer rbuf[QCS_MBUF_CNT];
 	} tx;
 	struct wait_event *subs;  /* recv wait_event the conn_stream associated is waiting on (via qc_subscribe) */
 	struct list list; /* To be used when adding in qcc->send_list or qcc->fctl_lsit */

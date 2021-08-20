@@ -1003,6 +1003,7 @@ struct qcs *bidi_qcs_new(struct qcc *qcc, uint64_t id)
 	qcs->tx.bytes    = qcs->tx.offset = 0;
 	qcs->tx.max_data = qcc->strms[qcs_type].tx.max_data;
 	qcs->tx.buf = BUF_NULL;
+	br_init(qcs->tx.rbuf, sizeof(qcs->tx.rbuf) / sizeof(qcs->tx.rbuf[0]));
 
 	eb64_insert(&qcc->streams_by_id, &qcs->by_id);
 	qcc->strms[qcs_type].nb_streams++;
@@ -1066,6 +1067,7 @@ struct qcs *luqs_new(struct qcc *qcc)
 	qcs->tx.max_data = qcc->strms[qcs_type].tx.max_data;
 	qcs->tx.offset = qcs->tx.bytes = 0;
 	qcs->tx.buf = BUF_NULL;
+	br_init(qcs->tx.rbuf, sizeof(qcs->tx.rbuf) / sizeof(qcs->tx.rbuf[0]));
 
 	qcs->subs = NULL;
 	LIST_INIT(&qcs->list);
@@ -1819,6 +1821,159 @@ static size_t qc_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	return ret;
 }
 
+static int qcs_push_frame(struct qcs *qcs, struct buffer *payload, size_t total, int fin)
+{
+	struct quic_frame *frm;
+	struct buffer buf = BUF_NULL;
+	//char DATA[] = "\x00\x0c\x68\x65\x6c\x6c\x6f\x2c\x20\x77\x6f\x72\x6c\x64";
+
+	qc_get_buf(qcs->qcc, &buf);
+	b_xfer(&buf, payload, b_data(payload));
+	//b_putblk(&buf, DATA, 14);
+	//total += 14;
+
+	/* set h3 frame length, excluding Type - Length */
+	b_head(&buf)[1] = total;
+	//b_head(&buf)[1] = total - 14;
+
+	frm = pool_zalloc(pool_head_quic_frame);
+	if (!frm)
+		goto err;
+
+	frm->type = QUIC_FT_STREAM_8;
+	if (fin)
+		frm->type |= QUIC_STREAM_FRAME_TYPE_FIN_BIT;
+	frm->stream.id = qcs->by_id.key;
+	if (total) {
+		frm->type |= QUIC_STREAM_FRAME_TYPE_LEN_BIT;
+		frm->stream.len = total + 2;
+		frm->stream.data = (unsigned char *)b_head(&buf);
+	}
+
+	struct quic_enc_level *qel = &qcs->qcc->conn->qc->els[QUIC_TLS_ENC_LEVEL_APP];
+	MT_LIST_APPEND(&qel->pktns->tx.frms, &frm->mt_list);
+	return 0;
+
+ err:
+ 	return -1;
+}
+
+static int qcs_send_resp_headers(struct qcs *qcs, struct htx *htx)
+{
+	struct buffer outbuf;
+	struct buffer *res;
+	struct http_hdr list[global.tune.max_http_hdr];
+	struct htx_sl *sl;
+	struct htx_blk *blk;
+	enum htx_blk_type type;
+	size_t total = 0;
+	int ret = 0;
+	int hdr;
+
+	sl = NULL;
+	hdr = 0;
+	for (blk = htx_get_head_blk(htx); blk; blk = htx_get_next_blk(htx, blk)) {
+		type = htx_get_blk_type(blk);
+
+		if (type == HTX_BLK_UNUSED)
+			continue;
+
+		if (type == HTX_BLK_EOH)
+			break;
+
+		if (type == HTX_BLK_RES_SL) {
+			/* start-line -> HEADERS h3 frame */
+			BUG_ON(sl);
+			sl = htx_get_blk_ptr(htx, blk);
+			qcs->status = sl->info.res.status;
+
+			fprintf(stderr, "HTX_BLK_RES_SL\n");
+			//total = 0;
+			//b_reset(res);
+
+			//total += qpack_encode_field_section_line(res);
+		}
+		else if (type == HTX_BLK_HDR) {
+			fprintf(stderr, "HTX_BLK_HDR\n");
+			list[hdr].n = htx_get_blk_name(htx, blk);
+			list[hdr].v = htx_get_blk_value(htx, blk);
+			hdr++;
+		}
+		else {
+			ABORT_NOW();
+			goto err;
+		}
+	}
+
+	BUG_ON(!sl);
+
+	list[hdr].n = ist("");
+
+	res = br_tail(qcs->tx.rbuf);
+	if (!qc_get_buf(qcs->qcc, res))
+		ABORT_NOW();
+
+	b_reset(&outbuf);
+	outbuf = b_make(b_tail(res), b_contig_space(res), 0, 0);
+
+	b_putchr(&outbuf, '\x01');  /* h3 frame type = HEADERS */
+	b_putchr(&outbuf, '\x00');  /* h3 frame length */
+	total += qpack_encode_field_section_line(&outbuf);
+	total += qpack_encode_int_status(&outbuf, qcs->status);
+
+	//for (hdr = 0; hdr < sizeof(list) / sizeof(list[0]); ++hdr) {
+	//	if (isteq(list[hdr].n, ist("")))
+	//		break;
+
+	//	total += qpack_encode_header(&outbuf, list[hdr].n, list[hdr].v);
+	//}
+	total += qpack_encode_header(&outbuf, ist("content-length"), ist("12"));
+
+	ret = 0;
+	blk = htx_get_head_blk(htx);
+	while (blk) {
+		type = htx_get_blk_type(blk);
+		ret += htx_get_blksz(blk);
+		blk = htx_remove_blk(htx, blk);
+		if (type == HTX_BLK_EOH)
+			break;
+	}
+
+	b_add(res, outbuf.data);
+	//qcs_push_frame(qcs, res, total, 0);
+
+ 	return ret;
+
+ err:
+ 	return 0;
+}
+
+static int qcs_send_resp_data(struct qcs *qcs, struct htx *htx)
+{
+	char data[] = "hello, world";
+	struct buffer outbuf;
+	struct buffer *res;
+	size_t total = 0;
+
+	fprintf(stderr, "HTX_BLK_DATA\n");
+
+	res = br_tail(qcs->tx.rbuf);
+	if (!qc_get_buf(qcs->qcc, res))
+		ABORT_NOW();
+
+	b_reset(&outbuf);
+	outbuf = b_make(b_tail(res), b_contig_space(res), 0, 0);
+
+	b_putchr(&outbuf, '\x00'); /* h3 frame type = DATA */
+	b_putchr(&outbuf, '\x00'); /* h3 frame length */
+	b_putblk(&outbuf, data, 12);
+	total += 12;
+
+	b_add(res, outbuf.data);
+	//qcs_push_frame(qcs, res, total, 1);
+
+	return total;
+}
 
 /* Called from the upper layer, to send data from buffer <buf> for no more than
  * <count> bytes. Returns the number of bytes effectively sent. Some status
@@ -1826,19 +1981,21 @@ static size_t qc_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
  */
 static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
 {
-	size_t room, total = 0;
+	size_t total = 0;
 	struct qcs *qcs = cs->ctx;
-	struct buffer *res;
-	struct quic_frame *frm;
+	//struct buffer *res;
 	struct htx *htx;
 	enum htx_blk_type btype;
 	struct htx_blk *blk;
-	struct htx_sl *sl;
+	//struct htx_sl *sl;
+	uint32_t bsize;
+	int32_t idx;
+	int ret;
+	int fin = 0;
 
 	TRACE_ENTER(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);
-	if (!count)
-		goto out;
 
+#if 0
 	res = &qcs->tx.buf;
 	if (!qc_get_buf(qcs->qcc, res)) {
 		qcs->qcc->flags |= QC_CF_MUX_MALLOC;
@@ -1851,13 +2008,19 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 
 	if (count > room)
 		count = room;
+#endif
 
 	htx = htx_from_buf(buf);
 
-	blk = htx_get_head_blk(htx);
-	for (blk = htx_get_head_blk(htx);
-	     blk; blk = htx_get_next_blk(htx, blk)) {
+	//blk = htx_get_head_blk(htx);
+	//for (blk = htx_get_head_blk(htx);
+	//     blk; blk = htx_get_next_blk(htx, blk)) {
+	//	btype = htx_get_blk_type(blk);
+	while (count && !htx_is_empty(htx)) {
+		idx = htx_get_head(htx);
+		blk = htx_get_blk(htx, idx);
 		btype = htx_get_blk_type(blk);
+		bsize = htx_get_blksz(blk);
 
 		/* Not implemented : QUIC on backend side */
 		BUG_ON(btype == HTX_BLK_REQ_SL);
@@ -1865,18 +2028,40 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		switch (btype) {
 		case HTX_BLK_RES_SL:
 			/* start-line -> HEADERS h3 frame */
-			b_putchr(res, '\x01');  /* h3 frame type = HEADERS */
-			b_putchr(res, '\x00');  /* h3 frame length */
-			total += 2;
-			total += qpack_encode_field_section_line(res);
-
-			sl = htx_get_blk_ptr(htx, blk);
-			qcs->status = sl->info.res.status;
-			total += qpack_encode_int_status(res, qcs->status);
+			ret = qcs_send_resp_headers(qcs, htx);
+			if (ret > 0) {
+				total += ret;
+				count -= ret;
+				if (ret < bsize)
+					goto done;
+			}
 			break;
 
 		case HTX_BLK_DATA:
 			/* TODO DATA h3 frame */
+#if 0
+			fprintf(stderr, "HTX_BLK_DATA\n");
+			{
+			char data[] = "hello, world";
+			total = 0;
+			b_reset(res);
+
+			b_putchr(res, '\x00'); /* h3 frame type = DATA */
+			b_putchr(res, '\x00'); /* h3 frame length */
+			b_putblk(res, data, 12);
+			total += 12;
+			qcs_push_frame(qcs, res, total, 1);
+			}
+#endif
+			ret = qcs_send_resp_data(qcs, htx);
+			fin = 1;
+			if (ret > 0) {
+				htx = htx_from_buf(buf);
+				total += ret;
+				count -= ret;
+				if (ret < bsize)
+					goto done;
+			}
 			break;
 
 		case HTX_BLK_TLR:
@@ -1885,10 +2070,17 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 			break;
 
 		default:
+			htx_remove_blk(htx, blk);
+			total += bsize;
+			count -= bsize;
+			break;
 			;
 		}
 	}
 
+ done:
+
+#if 0
 	/* set h3 frame length, excluding Type - Length */
 	b_head(res)[1] = total - 2;
 
@@ -1896,7 +2088,9 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	if (!frm)
 		goto err;
 
-	frm->type = QUIC_FT_STREAM_8 | QUIC_STREAM_FRAME_TYPE_FIN_BIT;
+	frm->type = QUIC_FT_STREAM_8;
+	if (fin)
+		frm->type |= QUIC_STREAM_FRAME_TYPE_FIN_BIT;
 	frm->stream.id = qcs->by_id.key;
 	if (total) {
 		frm->type |= QUIC_STREAM_FRAME_TYPE_LEN_BIT;
@@ -1906,6 +2100,23 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 
 	struct quic_enc_level *qel = &qcs->qcc->conn->qc->els[QUIC_TLS_ENC_LEVEL_APP];
 	MT_LIST_APPEND(&qel->pktns->tx.frms, &frm->mt_list);
+#endif
+	if (!fin)
+		goto out;
+
+	{
+		struct buffer *buf;
+		for (buf = br_head(qcs->tx.rbuf); b_size(buf); buf = br_del_head(qcs->tx.rbuf)) {
+			if (b_data(buf)) {
+				qcs_push_frame(qcs, buf, total, fin);
+				b_del(buf, total);
+			}
+			b_free(buf);
+		}
+		//buf = br_head(qcs->tx.rbuf);
+		//qcs_push_frame(qcs, buf, total, 1);
+		//b_del(buf, total);
+	}
  out:
 	fprintf(stderr, "%s: count=%zu\n", __func__, count);
 	TRACE_LEAVE(QC_EV_QCS_SEND|QC_EV_STRM_SEND, qcs->qcc->conn, qcs);

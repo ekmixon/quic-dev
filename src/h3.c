@@ -75,6 +75,8 @@ static inline struct buffer h3_b_dup(struct buffer *b)
 
 static int qcs_buf_available(void *target)
 {
+	// TODO FIXME
+#if 0
 	struct h3_uqs *h3_uqs = target;
 	struct qcs *qcs = h3_uqs->qcs;
 
@@ -83,6 +85,7 @@ static int qcs_buf_available(void *target)
 		tasklet_wakeup(h3_uqs->wait_event.tasklet);
 		return 1;
 	}
+#endif
 
 	return 0;
 }
@@ -171,6 +174,8 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 			qc_get_buf(qcs->qcc, &rxbuf2);
 			htx = htx_from_buf(&rxbuf2);
 
+			//h3_make_htx_request(list, htx);
+
 			/* first treat pseudo-header to build the start line */
 			for (hdr = 0; hdr < i; ++hdr) {
 				if (istmatch(list[hdr].n, ist(":"))) {
@@ -186,6 +191,8 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 				}
 			}
 
+			PRINT_IST("meth = ", meth);
+			PRINT_IST("path = ", path);
 			flags |= HTX_SL_F_VER_11;
 
 			htx_add_stline(htx, HTX_BLK_REQ_SL, flags, meth, path, ist("HTTP/3.0"));

@@ -37,6 +37,13 @@
 #include <stdlib.h>
 #endif
 
+#define PRINT_IST(pfx, str) \
+	fprintf(stderr, "%s", pfx);                     \
+	for (int _i = 0; _i < istlen(str); ++_i)        \
+		fprintf(stderr, "%c", istptr(str)[_i]); \
+	fprintf(stderr, "\n");
+
+
 /* ASCII to lower case conversion table */
 #define _IST_LC ((const unsigned char[256]){            \
 	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, \
