@@ -129,6 +129,7 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 	struct buffer rxbuf2 = BUF_NULL;
 	struct h3 *h3 = ctx;
 	struct htx *htx;
+	struct htx_sl *sl;
 	struct conn_stream *cs;
 	struct http_hdr list[global.tune.max_http_hdr];
 	unsigned int flags = HTX_SL_F_NONE;
@@ -195,7 +196,8 @@ static int h3_decode_qcs(struct qcs *qcs, void *ctx)
 			PRINT_IST("path = ", path);
 			flags |= HTX_SL_F_VER_11;
 
-			htx_add_stline(htx, HTX_BLK_REQ_SL, flags, meth, path, ist("HTTP/3.0"));
+			sl = htx_add_stline(htx, HTX_BLK_REQ_SL, flags, meth, path, ist("HTTP/3.0"));
+			sl->flags |= HTX_SL_F_BODYLESS;
 
 			if (isttest(authority))
 				htx_add_header(htx, ist("host"), authority);
