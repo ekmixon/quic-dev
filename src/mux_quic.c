@@ -1834,7 +1834,7 @@ static int qcs_push_frame(struct qcs *qcs, struct buffer *payload, int fin)
 	//total += 14;
 
 	/* set h3 frame length, excluding Type - Length */
-	b_head(&buf)[1] = total - 2;
+	//b_head(&buf)[1] = total - 2;
 	//b_head(&buf)[1] = total - 14;
 
 	frm = pool_zalloc(pool_head_quic_frame);
@@ -1842,8 +1842,8 @@ static int qcs_push_frame(struct qcs *qcs, struct buffer *payload, int fin)
 		goto err;
 
 	frm->type = QUIC_FT_STREAM_8;
-	//if (fin)
-	//	frm->type |= QUIC_STREAM_FRAME_TYPE_FIN_BIT;
+	if (fin)
+		frm->type |= QUIC_STREAM_FRAME_TYPE_FIN_BIT;
 	frm->stream.id = qcs->by_id.key;
 	if (total) {
 		frm->type |= QUIC_STREAM_FRAME_TYPE_LEN_BIT;
@@ -1929,7 +1929,7 @@ static int qcs_send_resp_headers(struct qcs *qcs, struct htx *htx)
 
 	//	total += qpack_encode_header(&outbuf, list[hdr].n, list[hdr].v);
 	//}
-	//total += qpack_encode_header(&outbuf, ist("content-length"), ist("0"));
+	total += qpack_encode_header(&outbuf, ist("content-length"), ist("12"));
 
 	ret = 0;
 	blk = htx_get_head_blk(htx);
@@ -1959,7 +1959,8 @@ int qcs_send_resp_data(struct qcs *qcs, struct htx *htx)
 
 	fprintf(stderr, "HTX_BLK_DATA\n");
 
-	res = br_tail(qcs->tx.rbuf);
+	//res = br_tail(qcs->tx.rbuf);
+	res = br_tail_add(qcs->tx.rbuf);
 	if (!qc_get_buf(qcs->qcc, res))
 		ABORT_NOW();
 
@@ -2076,7 +2077,7 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 			}
 			break;
 
-		//case HTX_BLK_DATA:
+		case HTX_BLK_DATA:
 		//	/* TODO DATA h3 frame */
 #if 0
 		//	fprintf(stderr, "HTX_BLK_DATA\n");
@@ -2092,17 +2093,17 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		//	qcs_push_frame(qcs, res, total, 1);
 		//	}
 #endif
-		//	//ret = qcs_send_resp_data(qcs, htx);
+			ret = qcs_send_resp_data(qcs, htx);
 		//	ret = qcs_skip_data(qcs, buf, count);
-		//	fin = 1;
-		//	if (ret > 0) {
-		//		htx = htx_from_buf(buf);
-		//		total += ret;
-		//		count -= ret;
-		//		if (ret < bsize)
-		//			goto done;
-		//	}
-		//	break;
+			fin = 1;
+			if (ret > 0) {
+				htx = htx_from_buf(buf);
+				total += ret;
+				count -= ret;
+				if (ret < bsize)
+					goto done;
+			}
+			break;
 
 		//case HTX_BLK_TLR:
 		//case HTX_BLK_EOT:
@@ -2139,22 +2140,30 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	struct quic_enc_level *qel = &qcs->qcc->conn->qc->els[QUIC_TLS_ENC_LEVEL_APP];
 	MT_LIST_APPEND(&qel->pktns->tx.frms, &frm->mt_list);
 #endif
-	//if (!fin)
-	//	goto out;
+	if (!fin)
+		goto out;
 
 	{
 		struct buffer *buf;
+		struct buffer final_buf = BUF_NULL;
+		b_alloc(&final_buf);
+
 		for (buf = br_head(qcs->tx.rbuf); b_size(buf); buf = br_del_head(qcs->tx.rbuf)) {
 			if (b_data(buf)) {
-				int sent = qcs_push_frame(qcs, buf, fin);
+				//int fin2 = br_head_idx(qcs->tx.rbuf) == br_tail_idx(qcs->tx.rbuf);
+				//int sent = qcs_push_frame(qcs, buf, fin2);
 				//b_del(buf, total);
-				b_del(buf, sent);
+				b_head(buf)[1] = b_data(buf) - 2;
+				size_t xfer = b_xfer(&final_buf, buf, b_data(buf));
+				b_del(buf, xfer);
 			}
 			b_free(buf);
 		}
 		//buf = br_head(qcs->tx.rbuf);
 		//qcs_push_frame(qcs, buf, total, 1);
 		//b_del(buf, total);
+
+		qcs_push_frame(qcs, &final_buf, 1);
 	}
  out:
 	fprintf(stderr, "%s: count=%zu\n", __func__, count);
