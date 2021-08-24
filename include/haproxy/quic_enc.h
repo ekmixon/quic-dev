@@ -202,7 +202,7 @@ static inline int b_quic_enc_int(struct buffer *b, uint64_t val)
 	shift = (len - 1) * 8;
 	/* set the bits of byte#0 which gives the length of the encoded integer */
 	size_bits = quic_log2(len) << QUIC_VARINT_BYTE_0_SHIFT;
-	pos = head = (unsigned char *)b_head(b);
+	pos = head = (unsigned char *)b_tail(b);
 	wrap = (unsigned char *)b_wrap(b);
 	while (len--) {
 		*pos++ = val >> shift;

@@ -1863,6 +1863,7 @@ static int qcs_push_frame(struct qcs *qcs, struct buffer *payload, int fin)
 static int qcs_send_resp_headers(struct qcs *qcs, struct htx *htx)
 {
 	struct buffer outbuf;
+	struct buffer headers_buf = BUF_NULL;
 	struct buffer *res;
 	struct http_hdr list[global.tune.max_http_hdr];
 	struct htx_sl *sl;
@@ -1919,17 +1920,28 @@ static int qcs_send_resp_headers(struct qcs *qcs, struct htx *htx)
 	outbuf = b_make(b_tail(res), b_contig_space(res), 0, 0);
 
 	b_putchr(&outbuf, '\x01');  /* h3 frame type = HEADERS */
-	b_putchr(&outbuf, '\x00');  /* h3 frame length */
-	total += qpack_encode_field_section_line(&outbuf);
-	total += qpack_encode_int_status(&outbuf, qcs->status);
+	//b_putchr(&outbuf, '\x00');  /* h3 frame length */
+	b_alloc(&headers_buf);
+	total += qpack_encode_field_section_line(&headers_buf);
+	total += qpack_encode_int_status(&headers_buf, qcs->status);
 
-	//for (hdr = 0; hdr < sizeof(list) / sizeof(list[0]); ++hdr) {
-	//	if (isteq(list[hdr].n, ist("")))
-	//		break;
+	//int i = 0;
+	for (hdr = 0; hdr < sizeof(list) / sizeof(list[0]); ++hdr) {
+		//if (i++ > 3)
+		//	continue;
 
-	//	total += qpack_encode_header(&outbuf, list[hdr].n, list[hdr].v);
-	//}
-	total += qpack_encode_header(&outbuf, ist("content-length"), ist("12"));
+		if (isteq(list[hdr].n, ist("")))
+			break;
+
+		total += qpack_encode_header(&headers_buf, list[hdr].n, list[hdr].v);
+	}
+	//total += qpack_encode_header(&outbuf, ist("content-length"), ist("12"));
+
+	//b_head(buf)[1] = b_data(buf) - 2;
+	//b_put_varint(&outbuf, b_data(&headers_buf));
+	if (!b_quic_enc_int(&outbuf, b_data(&headers_buf)))
+		ABORT_NOW();
+	b_xfer(&outbuf, &headers_buf, b_data(&headers_buf));
 
 	ret = 0;
 	blk = htx_get_head_blk(htx);
@@ -1950,31 +1962,70 @@ static int qcs_send_resp_headers(struct qcs *qcs, struct htx *htx)
  	return 0;
 }
 
-int qcs_send_resp_data(struct qcs *qcs, struct htx *htx)
+int qcs_send_resp_data(struct qcs *qcs, struct buffer *buf, size_t count)
 {
-	char data[] = "hello, world";
+	//char data[] = "hello, world";
 	struct buffer outbuf;
 	struct buffer *res;
 	size_t total = 0;
+	struct htx *htx;
+	int bsize, fsize;
+	struct htx_blk *blk;
+	enum htx_blk_type type;
 
 	fprintf(stderr, "HTX_BLK_DATA\n");
+
+	htx = htx_from_buf(buf);
+
+ new_frame:
+ 	if (!count || htx_is_empty(htx))
+ 		goto end;
+
+	blk = htx_get_head_blk(htx);
+	type = htx_get_blk_type(blk);
+	fsize = bsize = htx_get_blksz(blk);
+
+	if (type != HTX_BLK_DATA)
+		goto end;
 
 	//res = br_tail(qcs->tx.rbuf);
 	res = br_tail_add(qcs->tx.rbuf);
 	if (!qc_get_buf(qcs->qcc, res))
 		ABORT_NOW();
 
+	if (fsize > count)
+		fsize = count;
+
+	if (fsize + 2 > outbuf.size)
+		ABORT_NOW();
+
 	b_reset(&outbuf);
 	outbuf = b_make(b_tail(res), b_contig_space(res), 0, 0);
 
 	b_putchr(&outbuf, '\x00'); /* h3 frame type = DATA */
-	b_putchr(&outbuf, '\x00'); /* h3 frame length */
-	b_putblk(&outbuf, data, 12);
-	total += 12;
+	b_quic_enc_int(&outbuf, fsize);
+	b_reset(&outbuf);
+	//b_putchr(&outbuf, '\x00'); /* h3 frame length */
+	//b_sub(&outbuf, 2);
+	//b_putblk(&outbuf, data, 12);
+	//total += 12;
 
-	b_add(res, outbuf.data);
+	//b_add(res, outbuf.data);
 	//qcs_push_frame(qcs, res, total, 1);
 
+	total += fsize;
+	memcpy(outbuf.area + 9, htx_get_blk_ptr(htx, blk), fsize);
+	count -= fsize;
+
+	if (fsize == bsize)
+		htx_remove_blk(htx, blk);
+	else
+		htx_cut_data_blk(htx, blk, fsize);
+
+	b_add(res, fsize + 1 + quic_int_getsize(fsize));
+	goto new_frame;
+
+ end:
 	return total;
 }
 
@@ -2093,7 +2144,7 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		//	qcs_push_frame(qcs, res, total, 1);
 		//	}
 #endif
-			ret = qcs_send_resp_data(qcs, htx);
+			ret = qcs_send_resp_data(qcs, buf, count);
 		//	ret = qcs_skip_data(qcs, buf, count);
 			fin = 1;
 			if (ret > 0) {
@@ -2153,11 +2204,14 @@ static size_t qc_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 				//int fin2 = br_head_idx(qcs->tx.rbuf) == br_tail_idx(qcs->tx.rbuf);
 				//int sent = qcs_push_frame(qcs, buf, fin2);
 				//b_del(buf, total);
-				b_head(buf)[1] = b_data(buf) - 2;
+				//b_head(buf)[1] = b_data(buf) - 2;
 				size_t xfer = b_xfer(&final_buf, buf, b_data(buf));
 				b_del(buf, xfer);
 			}
 			b_free(buf);
+
+			// TODO TO REMOVE
+			//break;
 		}
 		//buf = br_head(qcs->tx.rbuf);
 		//qcs_push_frame(qcs, buf, total, 1);
