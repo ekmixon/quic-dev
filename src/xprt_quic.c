@@ -2903,6 +2903,11 @@ static void quic_conn_free(struct quic_conn *conn)
 		return;
 
 	free_quic_conn_cids(conn);
+	// TODO must access the listener for the lock here
+	//HA_RWLOCK_WRLOCK(OTHER_LOCK, &l->rx.cids_lock);
+	ebmb_delete(&conn->odcid_node);
+	ebmb_delete(&conn->scid_node);
+	//HA_RWLOCK_WRUNLOCK(OTHER_LOCK, &l->rx.cids_lock);
 	for (i = 0; i < QUIC_TLS_ENC_LEVEL_MAX; i++)
 		quic_conn_enc_level_uninit(&conn->els[i]);
 	if (conn->timer_task)
